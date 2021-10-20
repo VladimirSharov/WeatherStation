@@ -1,10 +1,10 @@
 {
 	"folders": [
 		{
-			"path": "..\\..\\my-project"
+			"path": "..\\..\\WeatherStation"
 		},
 		{
-			"name": "test2",
+			"name": "WeatherStation",
 			"path": ".."
 		}
 	],
