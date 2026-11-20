@@ -1,0 +1,759 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Weather Station</title>
+<meta name="description" content="Live readings from an STM32 + X-NUCLEO-IKS01A3 weather station, received on a Raspberry Pi.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='13' cy='13' r='7' fill='%23f59e0b'/%3E%3Cpath d='M10 26h14a5 5 0 0 0 0-10 7 7 0 0 0-13 2 4 4 0 0 0-1 8z' fill='%2394a3b8'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --surface: #ffffff;
+    --surface-2: #f8f9fb;
+    --border: #e3e6eb;
+    --text: #15181d;
+    --text-2: #5b6370;
+    --text-3: #8a919c;
+    --temp: #e8590c;
+    --temp-2: #f59f00;
+    --hum: #0c8599;
+    --press: #6741d9;
+    --ok: #2b8a3e;
+    --ok-bg: #ebfbee;
+    --bad: #c92a2a;
+    --bad-bg: #fff5f5;
+    --warn: #b35c00;
+    --warn-bg: #fff4e6;
+    --grid: #eceef2;
+    --shadow: 0 1px 2px rgba(16, 24, 40, .04), 0 1px 3px rgba(16, 24, 40, .06);
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1115;
+      --surface: #171a20;
+      --surface-2: #1d2128;
+      --border: #2a2f38;
+      --text: #e9ecf1;
+      --text-2: #a3abb8;
+      --text-3: #737b88;
+      --temp: #ff8a4c;
+      --temp-2: #ffc94d;
+      --hum: #3bc9db;
+      --press: #9775fa;
+      --ok: #51cf66;
+      --ok-bg: #12261a;
+      --bad: #ff6b6b;
+      --bad-bg: #2c1515;
+      --warn: #ffa94d;
+      --warn-bg: #2b1f10;
+      --grid: #23272f;
+      --shadow: none;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1115;
+    --surface: #171a20;
+    --surface-2: #1d2128;
+    --border: #2a2f38;
+    --text: #e9ecf1;
+    --text-2: #a3abb8;
+    --text-3: #737b88;
+    --temp: #ff8a4c;
+    --temp-2: #ffc94d;
+    --hum: #3bc9db;
+    --press: #9775fa;
+    --ok: #51cf66;
+    --ok-bg: #12261a;
+    --bad: #ff6b6b;
+    --bad-bg: #2c1515;
+    --warn: #ffa94d;
+    --warn-bg: #2b1f10;
+    --grid: #23272f;
+    --shadow: none;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  .num { font-variant-numeric: tabular-nums; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 20px 16px 48px; }
+
+  header {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    margin-bottom: 18px;
+  }
+  header h1 { font-size: 20px; margin: 0; letter-spacing: -.01em; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12.5px; color: var(--text-2);
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 999px; padding: 3px 10px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); }
+  .dot.live { background: var(--ok); box-shadow: 0 0 0 0 var(--ok); animation: pulse 2s infinite; }
+  .dot.stale { background: var(--bad); }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 60%, transparent); }
+    70% { box-shadow: 0 0 0 6px transparent; }
+    100% { box-shadow: 0 0 0 0 transparent; }
+  }
+  @media (prefers-reduced-motion: reduce) { .dot.live { animation: none; } }
+  header .spacer { flex: 1; }
+  .icon-btn {
+    border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+    border-radius: 8px; height: 30px; padding: 0 10px; cursor: pointer; font: inherit; font-size: 13px;
+  }
+  .icon-btn:hover { color: var(--text); }
+
+  .banner {
+    display: none;
+    background: var(--warn-bg); color: var(--warn);
+    border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+    border-radius: 10px; padding: 10px 14px; margin-bottom: 16px; font-size: 13.5px;
+  }
+  .banner.show { display: block; }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; box-shadow: var(--shadow);
+  }
+
+  .now {
+    display: grid; gap: 14px;
+    grid-template-columns: 1.4fr 1fr 1fr 1fr;
+    margin-bottom: 14px;
+  }
+  .metric { padding: 16px 18px; min-width: 0; }
+  .metric .label {
+    font-size: 12.5px; font-weight: 600; color: var(--text-2);
+    text-transform: uppercase; letter-spacing: .05em;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .metric .label i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+  .metric .value { font-size: 34px; font-weight: 650; letter-spacing: -.02em; margin-top: 6px; white-space: nowrap; }
+  .metric .value small { font-size: 16px; font-weight: 500; color: var(--text-2); margin-left: 2px; }
+  .metric .sub { font-size: 13px; color: var(--text-2); margin-top: 4px; }
+  .metric.hero .value { font-size: 52px; }
+  .bar { height: 6px; border-radius: 3px; background: var(--grid); margin-top: 10px; overflow: hidden; }
+  .bar span { display: block; height: 100%; background: var(--hum); border-radius: 3px; transition: width .6s; }
+  .trend { font-weight: 600; }
+  .trend.up { color: var(--ok); }
+  .trend.down { color: var(--warn); }
+
+  .charts { padding: 6px 0 4px; margin-bottom: 14px; }
+  .charts-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+    padding: 10px 18px 6px;
+  }
+  .charts-head h2, .health h2 { font-size: 15px; margin: 0; }
+  .tabs { display: inline-flex; background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; padding: 2px; }
+  .tabs button {
+    border: 0; background: transparent; color: var(--text-2); font: inherit; font-size: 13px;
+    padding: 4px 12px; border-radius: 7px; cursor: pointer;
+  }
+  .tabs button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow); font-weight: 600; }
+  .chart { position: relative; padding: 4px 18px 10px; }
+  .chart + .chart { border-top: 1px solid var(--border); }
+  .chart-title { display: flex; gap: 14px; align-items: baseline; font-size: 12.5px; color: var(--text-2); margin: 8px 0 2px; flex-wrap: wrap; }
+  .chart-title b { color: var(--text); font-weight: 600; font-size: 13px; }
+  .chart-title .key { display: inline-flex; align-items: center; gap: 5px; }
+  .chart-title .key i { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
+  .chart canvas { display: block; width: 100%; height: 150px; }
+  .tip {
+    position: absolute; pointer-events: none; display: none; z-index: 2;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 9px; font-size: 12.5px; box-shadow: 0 4px 14px rgba(0,0,0,.12); white-space: nowrap;
+  }
+
+  .health { display: grid; grid-template-columns: 1fr 1.3fr; gap: 14px; }
+  .health .card { padding: 16px 18px; }
+  .sensors { display: grid; gap: 8px; margin-top: 12px; }
+  .sensor {
+    display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center;
+    padding: 9px 12px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--border);
+  }
+  .sensor .name { font-weight: 600; font-size: 13.5px; }
+  .sensor .what { font-size: 12.5px; color: var(--text-2); }
+  .pill { font-size: 11.5px; font-weight: 700; letter-spacing: .04em; padding: 2px 8px; border-radius: 999px; }
+  .pill.ok { color: var(--ok); background: var(--ok-bg); }
+  .pill.bad { color: var(--bad); background: var(--bad-bg); }
+  .agree { font-size: 12.5px; color: var(--text-2); margin-top: 10px; }
+
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }
+  .stat { background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; min-width: 0; }
+  .stat .k { font-size: 11.5px; color: var(--text-2); }
+  .stat .v { font-size: 18px; font-weight: 650; }
+  .log-title { font-size: 12.5px; color: var(--text-2); margin: 14px 0 6px; }
+  .log {
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 8px 10px; max-height: 168px; overflow: auto; margin: 0;
+  }
+  .log .row { display: grid; grid-template-columns: auto 1fr; gap: 10px; }
+  .log .t { color: var(--text-3); }
+  .log .raw { color: var(--bad); word-break: break-all; }
+  .log .why { color: var(--text-2); grid-column: 2; margin-bottom: 4px; }
+  .log .empty { color: var(--text-3); }
+
+  footer { margin-top: 22px; font-size: 12.5px; color: var(--text-3); text-align: center; }
+  footer a { color: inherit; }
+
+  @media (max-width: 900px) {
+    .now { grid-template-columns: 1fr 1fr; }
+    .health { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 520px) {
+    .metric .value { font-size: 28px; }
+    .metric.hero .value { font-size: 40px; }
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .chart canvas { height: 130px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Weather Station</h1>
+    <span class="chip"><span class="dot" id="liveDot"></span><span id="liveText">connecting…</span></span>
+    <span class="chip" id="sourceChip">—</span>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" type="button" aria-label="Toggle colour theme">Theme</button>
+  </header>
+
+  <div class="banner" id="demoBanner">
+    <b>Demo mode.</b> No receiver API was reachable, so this page is simulating the station in your browser,
+    including the occasional corrupted frame. Run <code>receiver.py</code> on the Pi to see real data.
+  </div>
+
+  <section class="now">
+    <div class="card metric hero">
+      <div class="label"><i style="background:var(--temp)"></i>Temperature</div>
+      <div class="value num" id="vTemp">–<small>°C</small></div>
+      <div class="sub num" id="vTempSub">&nbsp;</div>
+    </div>
+    <div class="card metric">
+      <div class="label"><i style="background:var(--hum)"></i>Humidity</div>
+      <div class="value num" id="vHum">–<small>%</small></div>
+      <div class="bar"><span id="humBar" style="width:0"></span></div>
+    </div>
+    <div class="card metric">
+      <div class="label"><i style="background:var(--press)"></i>Pressure</div>
+      <div class="value num" id="vPress">–<small>hPa</small></div>
+      <div class="sub" id="vPressSub">&nbsp;</div>
+    </div>
+    <div class="card metric">
+      <div class="label"><i style="background:var(--temp-2)"></i>Dew point</div>
+      <div class="value num" id="vDew">–<small>°C</small></div>
+      <div class="sub" id="vDewSub">&nbsp;</div>
+    </div>
+  </section>
+
+  <section class="card charts">
+    <div class="charts-head">
+      <h2>History</h2>
+      <div class="tabs" role="group" aria-label="Time range" id="rangeTabs">
+        <button type="button" data-h="1">1h</button>
+        <button type="button" data-h="6" aria-pressed="true">6h</button>
+        <button type="button" data-h="24">24h</button>
+        <button type="button" data-h="168">7d</button>
+      </div>
+    </div>
+    <div class="chart" data-chart="temp">
+      <div class="chart-title"><b>Temperature °C</b>
+        <span class="key"><i style="background:var(--temp)"></i>HTS221</span>
+        <span class="key"><i style="background:var(--temp-2)"></i>STTS751</span>
+      </div>
+      <canvas></canvas><div class="tip"></div>
+    </div>
+    <div class="chart" data-chart="hum">
+      <div class="chart-title"><b>Relative humidity %</b></div>
+      <canvas></canvas><div class="tip"></div>
+    </div>
+    <div class="chart" data-chart="press">
+      <div class="chart-title"><b>Pressure hPa</b></div>
+      <canvas></canvas><div class="tip"></div>
+    </div>
+  </section>
+
+  <section class="health">
+    <div class="card">
+      <h2>Sensors</h2>
+      <div class="sensors" id="sensors"></div>
+      <div class="agree num" id="agree">&nbsp;</div>
+    </div>
+    <div class="card">
+      <h2>Serial link</h2>
+      <div class="stats">
+        <div class="stat"><div class="k">Frames OK</div><div class="v num" id="sOk">–</div></div>
+        <div class="stat"><div class="k">Rejected</div><div class="v num" id="sBad">–</div></div>
+        <div class="stat"><div class="k">Dropped</div><div class="v num" id="sDrop">–</div></div>
+        <div class="stat"><div class="k">Link quality</div><div class="v num" id="sQ">–</div></div>
+      </div>
+      <div class="log-title">Recently rejected lines (failed checksum, truncated or noise)</div>
+      <div class="log" id="rejectLog"><span class="empty">Nothing rejected yet.</span></div>
+    </div>
+  </section>
+
+  <footer>
+    STM32L152RE + X-NUCLEO-IKS01A3 → UART → Raspberry Pi ·
+    <a href="https://github.com/VladimirSharov/WeatherStation">source</a>
+  </footer>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const SENSORS = [
+    { bit: 1, name: "HTS221", what: "Temperature + humidity" },
+    { bit: 2, name: "LPS22HH", what: "Barometric pressure" },
+    { bit: 4, name: "STTS751", what: "Reference temperature" },
+  ];
+  const LATEST_MS = 2000, HISTORY_MS = 30000;
+  const $ = (id) => document.getElementById(id);
+  const charts = {};
+  let history = [];
+
+  let rangeHours = 6;
+  try { rangeHours = Number(localStorage.getItem("ws.range")) || 6; } catch (_) {}
+
+  // ---------------------------------------------------------------- theme
+  const themeBtn = $("themeBtn");
+  function applyTheme(t) {
+    if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
+    redrawAll();
+  }
+  try { applyTheme(localStorage.getItem("ws.theme")); } catch (_) {}
+  themeBtn.addEventListener("click", () => {
+    const dark = getComputedStyle(document.documentElement).colorScheme === "dark";
+    const next = dark ? "light" : "dark";
+    try { localStorage.setItem("ws.theme", next); } catch (_) {}
+    applyTheme(next);
+  });
+
+  // ---------------------------------------------------------------- data sources
+  const api = {
+    async latest() {
+      const r = await fetch("api/latest", { cache: "no-store" });
+      if (!r.ok) throw new Error(r.status);
+      return r.json();
+    },
+    async history(h) {
+      const r = await fetch("api/history?hours=" + h, { cache: "no-store" });
+      if (!r.ok) throw new Error(r.status);
+      return (await r.json()).points;
+    },
+  };
+
+  // In-browser port of receiver/simulator.py, used when there is no API.
+  function makeDemo() {
+    const gauss = () => {
+      let u = 0, v = 0;
+      while (!u) u = Math.random();
+      while (!v) v = Math.random();
+      return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+    };
+    const phase = Math.random() * 2 * Math.PI;
+    const sample = (t) => {
+      const d = new Date(t * 1000);
+      const hour = d.getHours() + d.getMinutes() / 60 + d.getSeconds() / 3600;
+      const temp = 17 + 5.5 * Math.sin(2 * Math.PI * (hour - 9) / 24) + gauss() * 0.08;
+      const hum = Math.min(98, Math.max(12, 58 - 2.6 * (temp - 17) + gauss() * 0.4));
+      const press = 1012 + 7 * Math.sin(2 * Math.PI * (t / 86400) / 3.5 + phase) + gauss() * 0.05;
+      const temp2 = temp + 0.35 + gauss() * 0.06;
+      return { ts: t, temp, hum, press, temp2, status: 0 };
+    };
+    const now = () => Date.now() / 1000;
+    const rows = [];
+    for (let t = now() - 7 * 86400; t < now(); t += 120) rows.push(sample(t));
+    let seq = 0, ok = 0, bad = 0;
+    const rejects = [];
+    const garble = () => {
+      const r = sample(now());
+      const body = `WS,${seq},${Math.round(r.temp * 100)},${Math.round(r.hum * 100)},${Math.round(r.press * 100)},${Math.round(r.temp2 * 100)},0`;
+      const kind = Math.floor(Math.random() * 3);
+      if (kind === 0) return { line: "$" + body.slice(0, 6 + Math.floor(Math.random() * 12)), reason: "missing checksum" };
+      if (kind === 1) {
+        const i = 4 + Math.floor(Math.random() * (body.length - 5));
+        const flipped = body.slice(0, i) + String.fromCharCode(body.charCodeAt(i) ^ 4) + body.slice(i + 1);
+        return { line: "$" + flipped + "*" + "3A", reason: "checksum mismatch" };
+      }
+      let s = "";
+      for (let i = 0; i < 8 + Math.random() * 8; i++) s += "�";
+      return { line: s, reason: "no $WS header" };
+    };
+    const tick = () => {
+      if (Math.random() < 0.04) {
+        const g = garble();
+        bad++;
+        rejects.unshift({ ts: now(), line: g.line, reason: g.reason });
+        rejects.length = Math.min(rejects.length, 12);
+      } else {
+        rows.push(Object.assign(sample(now()), { seq }));
+        ok++;
+      }
+      seq++;
+    };
+    return {
+      async latest() {
+        tick();
+        const last = rows[rows.length - 1];
+        const t3 = last.ts - 3 * 3600;
+        const past = rows.find((r) => r.ts >= t3);
+        return {
+          source: "demo (in-browser)",
+          now: now(),
+          reading: last,
+          stale: false,
+          pressure_trend_3h: past ? +(last.press - past.press).toFixed(2) : null,
+          link: {
+            frames_ok: ok, frames_rejected: bad, frames_dropped: 0,
+            link_quality_pct: ok + bad ? +(100 * ok / (ok + bad)).toFixed(1) : null,
+            recent_rejects: rejects,
+          },
+        };
+      },
+      async history(h) {
+        const from = now() - h * 3600;
+        const pts = rows.filter((r) => r.ts >= from);
+        return bucket(pts, from, now(), 400);
+      },
+    };
+  }
+
+  function bucket(pts, from, to, n) {
+    const size = Math.max((to - from) / n, 1);
+    const out = new Map();
+    for (const p of pts) {
+      const k = Math.floor(p.ts / size);
+      let b = out.get(k);
+      if (!b) out.set(k, (b = { ts: k * size + size / 2, n: {}, s: {} }));
+      for (const f of ["temp", "hum", "press", "temp2"]) {
+        if (p[f] == null) continue;
+        b.s[f] = (b.s[f] || 0) + p[f];
+        b.n[f] = (b.n[f] || 0) + 1;
+      }
+    }
+    return [...out.values()].map((b) => ({
+      ts: b.ts,
+      temp: b.n.temp ? b.s.temp / b.n.temp : null,
+      hum: b.n.hum ? b.s.hum / b.n.hum : null,
+      press: b.n.press ? b.s.press / b.n.press : null,
+      temp2: b.n.temp2 ? b.s.temp2 / b.n.temp2 : null,
+    }));
+  }
+
+  // ---------------------------------------------------------------- formatting
+  const fmt = (v, d = 1) => (v == null || Number.isNaN(v) ? "–" : v.toFixed(d));
+  function dewPoint(t, rh) {
+    if (t == null || rh == null || rh <= 0) return null;
+    const a = 17.62, b = 243.12;
+    const g = Math.log(rh / 100) + (a * t) / (b + t);
+    return (b * g) / (a - g);
+  }
+  function comfort(dp) {
+    if (dp == null) return "";
+    if (dp < 10) return "Dry";
+    if (dp < 16) return "Comfortable";
+    if (dp < 18) return "A little humid";
+    if (dp < 21) return "Humid";
+    return "Muggy";
+  }
+  function ago(s) {
+    if (s < 5) return "just now";
+    if (s < 60) return Math.round(s) + "s ago";
+    if (s < 3600) return Math.round(s / 60) + "m ago";
+    return Math.round(s / 3600) + "h ago";
+  }
+  const timeFmt = (t, withDate) =>
+    new Date(t * 1000).toLocaleString([], withDate
+      ? { weekday: "short", hour: "2-digit", minute: "2-digit" }
+      : { hour: "2-digit", minute: "2-digit" });
+  const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  // ---------------------------------------------------------------- rendering: now + health
+  function renderLatest(d) {
+    const r = d.reading;
+    $("sourceChip").textContent = "source: " + d.source;
+    const dot = $("liveDot");
+    if (!r) {
+      dot.className = "dot stale";
+      $("liveText").textContent = "waiting for first frame";
+    } else {
+      dot.className = "dot " + (d.stale ? "stale" : "live");
+      $("liveText").textContent = (d.stale ? "stale · last frame " : "live · ") + ago(d.now - r.ts);
+    }
+    if (r) {
+      $("vTemp").innerHTML = fmt(r.temp) + "<small>°C</small>";
+      $("vHum").innerHTML = fmt(r.hum, 0) + "<small>%</small>";
+      $("humBar").style.width = (r.hum == null ? 0 : Math.max(0, Math.min(100, r.hum))) + "%";
+      $("vPress").innerHTML = fmt(r.press, 1) + "<small>hPa</small>";
+      const dp = dewPoint(r.temp, r.hum);
+      $("vDew").innerHTML = fmt(dp) + "<small>°C</small>";
+      $("vDewSub").textContent = comfort(dp);
+
+      const tr = d.pressure_trend_3h;
+      const ps = $("vPressSub");
+      if (tr == null) ps.textContent = "Trend after 3 h of data";
+      else if (tr > 1.6) ps.innerHTML = `<span class="trend up">▲ ${fmt(tr)} hPa / 3h</span> · fair weather likely`;
+      else if (tr < -1.6) ps.innerHTML = `<span class="trend down">▼ ${fmt(Math.abs(tr))} hPa / 3h</span> · unsettled`;
+      else ps.innerHTML = `<span class="trend">▶ ${tr >= 0 ? "+" : ""}${fmt(tr)} hPa / 3h</span> · steady`;
+
+      $("sensors").innerHTML = SENSORS.map((s) => {
+        const bad = r.status & s.bit;
+        return `<div class="sensor"><span class="pill ${bad ? "bad" : "ok"}">${bad ? "FAULT" : "OK"}</span>
+          <div><div class="name">${s.name}</div><div class="what">${s.what}</div></div><span></span></div>`;
+      }).join("");
+      $("agree").textContent = r.temp != null && r.temp2 != null
+        ? `HTS221 and STTS751 differ by ${fmt(Math.abs(r.temp - r.temp2), 2)} °C`
+        : " ";
+    }
+
+    const l = d.link;
+    $("sOk").textContent = l.frames_ok.toLocaleString();
+    $("sBad").textContent = l.frames_rejected.toLocaleString();
+    $("sDrop").textContent = l.frames_dropped.toLocaleString();
+    $("sQ").textContent = l.link_quality_pct == null ? "–" : l.link_quality_pct + "%";
+    $("rejectLog").innerHTML = l.recent_rejects.length
+      ? l.recent_rejects.map((x) => `<div class="row"><span class="t">${timeFmt(x.ts)}</span>
+          <span class="raw">${esc(JSON.stringify(x.line))}</span><span class="why">${esc(x.reason)}</span></div>`).join("")
+      : '<span class="empty">Nothing rejected yet.</span>';
+  }
+
+  // ---------------------------------------------------------------- rendering: charts
+  const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+  const CHART_DEFS = {
+    temp: { series: [["temp", "--temp", "HTS221"], ["temp2", "--temp-2", "STTS751"]], unit: "°C", d: 1 },
+    hum: { series: [["hum", "--hum", "Humidity"]], unit: "%", d: 0 },
+    press: { series: [["press", "--press", "Pressure"]], unit: "hPa", d: 1 },
+  };
+
+  function niceTicks(min, max, count) {
+    const span = max - min || 1;
+    const step0 = span / count;
+    const mag = Math.pow(10, Math.floor(Math.log10(step0)));
+    const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= step0);
+    const ticks = [];
+    for (let v = Math.ceil(min / step) * step; v <= max + 1e-9; v += step) ticks.push(+v.toFixed(6));
+    return ticks;
+  }
+
+  function drawChart(key, hoverIdx) {
+    const el = charts[key];
+    if (!el) return;
+    const def = CHART_DEFS[key];
+    const canvas = el.canvas;
+    const dpr = window.devicePixelRatio || 1;
+    const W = canvas.clientWidth, H = canvas.clientHeight;
+    if (!W || !H) return;
+    if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
+      canvas.width = Math.round(W * dpr);
+      canvas.height = Math.round(H * dpr);
+    }
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+
+    const padL = 40, padR = 6, padT = 8, padB = 20;
+    const pw = W - padL - padR, ph = H - padT - padB;
+    const pts = history;
+    ctx.font = "11px system-ui, sans-serif";
+    ctx.fillStyle = css("--text-3");
+
+    let lo = Infinity, hi = -Infinity;
+    for (const p of pts) for (const [f] of def.series) if (p[f] != null) { lo = Math.min(lo, p[f]); hi = Math.max(hi, p[f]); }
+    if (!isFinite(lo)) {
+      ctx.textAlign = "center";
+      ctx.fillText("No data in this range yet", W / 2, H / 2);
+      el.layout = null;
+      return;
+    }
+    const padV = Math.max((hi - lo) * 0.12, key === "press" ? 0.5 : 0.3);
+    lo -= padV; hi += padV;
+    const t0 = pts[0].ts, t1 = pts[pts.length - 1].ts;
+    const tspan = Math.max(t1 - t0, 1);
+    const x = (t) => padL + ((t - t0) / tspan) * pw;
+    const y = (v) => padT + (1 - (v - lo) / (hi - lo)) * ph;
+
+    // grid + y labels
+    ctx.strokeStyle = css("--grid");
+    ctx.lineWidth = 1;
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    for (const v of niceTicks(lo, hi, 4)) {
+      const yy = Math.round(y(v)) + 0.5;
+      ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(W - padR, yy); ctx.stroke();
+      ctx.fillText(v.toFixed(Math.abs(hi - lo) < 4 ? 1 : 0), padL - 6, yy);
+    }
+    // x labels
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    const withDate = tspan > 30 * 3600;
+    const nx = Math.max(2, Math.min(6, Math.floor(pw / 110)));
+    for (let i = 0; i <= nx; i++) {
+      const t = t0 + (tspan * i) / nx;
+      ctx.textAlign = i === 0 ? "left" : i === nx ? "right" : "center";
+      ctx.fillText(timeFmt(t, withDate), x(t), H - padB + 5);
+    }
+
+    // series (null values break the line)
+    ctx.lineJoin = "round";
+    def.series.forEach(([f, color], si) => {
+      const c = css(color);
+      if (si === 0) {
+        const grad = ctx.createLinearGradient(0, padT, 0, padT + ph);
+        grad.addColorStop(0, c + "33");
+        grad.addColorStop(1, c + "00");
+        ctx.fillStyle = grad;
+        let open = false, startX = 0, lastX = 0;
+        ctx.beginPath();
+        for (const p of pts) {
+          if (p[f] == null) {
+            if (open) { ctx.lineTo(lastX, padT + ph); ctx.lineTo(startX, padT + ph); ctx.closePath(); open = false; }
+            continue;
+          }
+          const xx = x(p.ts), yy = y(p[f]);
+          if (!open) { ctx.moveTo(xx, yy); startX = xx; open = true; } else ctx.lineTo(xx, yy);
+          lastX = xx;
+        }
+        if (open) { ctx.lineTo(lastX, padT + ph); ctx.lineTo(startX, padT + ph); ctx.closePath(); }
+        ctx.fill();
+      }
+      ctx.strokeStyle = c;
+      ctx.lineWidth = si === 0 ? 2 : 1.5;
+      ctx.beginPath();
+      let pen = false;
+      for (const p of pts) {
+        if (p[f] == null) { pen = false; continue; }
+        const xx = x(p.ts), yy = y(p[f]);
+        if (pen) ctx.lineTo(xx, yy); else { ctx.moveTo(xx, yy); pen = true; }
+      }
+      ctx.stroke();
+    });
+
+    // hover crosshair
+    if (hoverIdx != null && pts[hoverIdx]) {
+      const p = pts[hoverIdx];
+      const xx = Math.round(x(p.ts)) + 0.5;
+      ctx.strokeStyle = css("--text-3");
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(xx, padT); ctx.lineTo(xx, padT + ph); ctx.stroke();
+      ctx.setLineDash([]);
+      for (const [f, color] of def.series) {
+        if (p[f] == null) continue;
+        ctx.fillStyle = css("--surface");
+        ctx.strokeStyle = css(color);
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(xx, y(p[f]), 3.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      }
+    }
+    el.layout = { x, padL, pw, t0, tspan };
+  }
+
+  function redrawAll(hoverIdx) { for (const k of Object.keys(charts)) drawChart(k, hoverIdx); }
+
+  function setupCharts() {
+    document.querySelectorAll(".chart").forEach((wrap) => {
+      const key = wrap.dataset.chart;
+      charts[key] = { canvas: wrap.querySelector("canvas"), tip: wrap.querySelector(".tip"), layout: null };
+      const canvas = charts[key].canvas;
+      const move = (clientX) => {
+        const L = charts[key].layout;
+        if (!L || !history.length) return;
+        const rect = canvas.getBoundingClientRect();
+        const t = L.t0 + ((clientX - rect.left - L.padL) / L.pw) * L.tspan;
+        let best = 0, bd = Infinity;
+        history.forEach((p, i) => { const dd = Math.abs(p.ts - t); if (dd < bd) { bd = dd; best = i; } });
+        redrawAll(best);
+        const p = history[best];
+        for (const [k, c] of Object.entries(charts)) {
+          const def = CHART_DEFS[k];
+          const lines = def.series.map(([f, col, name]) =>
+            `<div><span style="color:var(${col})">●</span> ${def.series.length > 1 ? name + " " : ""}<b class="num">${fmt(p[f], def.d + 1)}</b> ${def.unit}</div>`).join("");
+          c.tip.innerHTML = `<div style="color:var(--text-2)">${timeFmt(p.ts, L.tspan > 30 * 3600)}</div>${lines}`;
+          c.tip.style.display = "block";
+          // tip is positioned in the .chart box; the canvas sits at its left padding
+          const xx = (c.layout ? c.layout.x(p.ts) : 0) + c.canvas.offsetLeft;
+          const tw = c.tip.offsetWidth;
+          const boxW = c.canvas.parentElement.clientWidth;
+          const left = xx + 12 + tw > boxW - 4 ? xx - 12 - tw : xx + 12;
+          c.tip.style.left = Math.max(4, left) + "px";
+          c.tip.style.top = "30px";
+        }
+      };
+      const leave = () => { for (const c of Object.values(charts)) c.tip.style.display = "none"; redrawAll(); };
+      canvas.addEventListener("mousemove", (e) => move(e.clientX));
+      canvas.addEventListener("mouseleave", leave);
+      canvas.addEventListener("touchstart", (e) => move(e.touches[0].clientX), { passive: true });
+      canvas.addEventListener("touchmove", (e) => move(e.touches[0].clientX), { passive: true });
+      canvas.addEventListener("touchend", leave);
+    });
+    let raf = 0;
+    new ResizeObserver(() => { cancelAnimationFrame(raf); raf = requestAnimationFrame(() => redrawAll()); })
+      .observe(document.querySelector(".charts"));
+  }
+
+  function renderRangeStats() {
+    const temps = history.map((p) => p.temp).filter((v) => v != null);
+    const label = { 1: "1 h", 6: "6 h", 24: "24 h", 168: "7 days" }[rangeHours] || rangeHours + " h";
+    $("vTempSub").textContent = temps.length
+      ? `Low ${fmt(Math.min(...temps))}° · High ${fmt(Math.max(...temps))}° over ${label}`
+      : " ";
+  }
+
+  // ---------------------------------------------------------------- loop
+  let source = api;
+
+  async function refreshLatest() {
+    try { renderLatest(await source.latest()); } catch (e) { console.warn("latest", e); }
+  }
+  async function refreshHistory() {
+    try {
+      history = await source.history(rangeHours);
+      renderRangeStats();
+      redrawAll();
+    } catch (e) { console.warn("history", e); }
+  }
+
+  function setupTabs() {
+    const btns = document.querySelectorAll("#rangeTabs button");
+    btns.forEach((b) => {
+      b.setAttribute("aria-pressed", String(Number(b.dataset.h) === rangeHours));
+      b.addEventListener("click", () => {
+        rangeHours = Number(b.dataset.h);
+        try { localStorage.setItem("ws.range", rangeHours); } catch (_) {}
+        btns.forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+        refreshHistory();
+      });
+    });
+  }
+
+  async function start() {
+    setupCharts();
+    setupTabs();
+    try {
+      await api.latest();
+    } catch (_) {
+      source = makeDemo();
+      $("demoBanner").classList.add("show");
+    }
+    await Promise.all([refreshLatest(), refreshHistory()]);
+    setInterval(refreshLatest, LATEST_MS);
+    setInterval(refreshHistory, HISTORY_MS);
+  }
+
+  start();
+})();
+</script>
+</body>
+</html>

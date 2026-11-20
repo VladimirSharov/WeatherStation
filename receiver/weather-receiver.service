@@ -1,0 +1,24 @@
+# systemd unit for running the receiver on a Raspberry Pi at boot.
+#
+#   sudo cp weather-receiver.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now weather-receiver
+#   journalctl -u weather-receiver -f      # live log, incl. rejected frames
+#
+# Adjust User and the paths if the repo is not in /home/pi/WeatherStation.
+# The user needs to be in the 'dialout' group to open /dev/ttyACM0.
+
+[Unit]
+Description=Weather station receiver and dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/WeatherStation/receiver
+ExecStart=/home/pi/WeatherStation/receiver/.venv/bin/python receiver.py --serial /dev/ttyACM0 --db /home/pi/weather.db
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
