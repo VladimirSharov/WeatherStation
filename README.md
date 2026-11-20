@@ -81,6 +81,8 @@ python receiver.py --simulate --backfill-hours 24 --corrupt-rate 0.03
 # open http://localhost:8080/
 ```
 
+If PowerShell refuses to run `activate` ("running scripts is disabled"), either allow local scripts once with `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, or skip activation and call the venv's Python directly: `.venv\Scripts\python receiver.py ...`.
+
 The simulator speaks the firmware's protocol for two stations:
 - **Indoor:** the IKS01A3 board, with temperature, humidity, pressure and a second temperature.
 - **Outdoor:** temperature and humidity only, with a daily cycle.
