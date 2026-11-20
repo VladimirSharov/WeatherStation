@@ -13,8 +13,10 @@
   *
   * Wire format (one ASCII line per sample, 115200 8N1 on USART2 / ST-LINK VCP):
   *
-  *   $WS,<seq>,<temp_cC>,<hum_c%>,<press_Pa>,<temp2_cC>,<status>*<XOR>\r\n
+  *   $WS,<station>,<seq>,<temp_cC>,<hum_c%>,<press_Pa>,<temp2_cC>,<status>*<XOR>\r\n
   *
+  *   station   STATION_ID below, so several stations can share one receiver
+  *   seq       per-station sample counter, lets the receiver spot lost frames
   *   temp_cC   HTS221 temperature in centi-degC   (2351  -> 23.51 C)
   *   hum_c%    HTS221 humidity in centi-percent   (4512  -> 45.12 %RH)
   *   press_Pa  LPS22HH pressure in pascal         (101325 -> 1013.25 hPa)
@@ -67,6 +69,11 @@ typedef struct
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+/* Station number in every frame. Override per board, e.g. -DSTATION_ID=2 */
+#ifndef STATION_ID
+#define STATION_ID 1u
+#endif
+
 /* Task Stack Size (in CPU_STK words, 4 bytes each) */
 #define APP_TASK_START_STK_SIZE 128u
 #define UART_SEND_STK_SIZE      512u   /* snprintf needs headroom */
@@ -283,7 +290,7 @@ static void AppTaskStart(void *p_arg)
 
 static void UartSend(void *p_arg)
 {
-  static const char banner[] = "# weather-station up, frame $WS,seq,t,h,p,t2,st*cs\r\n";
+  static const char banner[] = "# weather-station up, frame $WS,id,seq,t,h,p,t2,st*cs\r\n";
   char frame[FRAME_MAX];
   OS_ERR os_err;
   OS_MSG_SIZE size;
@@ -417,7 +424,8 @@ static uint16_t FormatFrame(const WeatherSample *s, char *buf, uint16_t len)
 {
   uint8_t checksum = 0u;
   int i;
-  int n = snprintf(buf, len, "$WS,%lu,%ld,%ld,%ld,%ld,%u",
+  int n = snprintf(buf, len, "$WS,%u,%lu,%ld,%ld,%ld,%ld,%u",
+                   (unsigned)STATION_ID,
                    (unsigned long)s->seq,
                    (long)s->temp_cC,
                    (long)s->hum_cPct,

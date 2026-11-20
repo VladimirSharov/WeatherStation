@@ -16,7 +16,7 @@ Wants=network-online.target
 [Service]
 User=pi
 WorkingDirectory=/home/pi/WeatherStation/receiver
-ExecStart=/home/pi/WeatherStation/receiver/.venv/bin/python receiver.py --serial /dev/ttyACM0 --db /home/pi/weather.db
+ExecStart=/home/pi/WeatherStation/receiver/.venv/bin/python receiver.py --serial /dev/ttyACM0 --names "1=Indoor,2=Outdoor" --db /home/pi/weather.db
 Restart=on-failure
 RestartSec=5
 

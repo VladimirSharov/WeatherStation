@@ -1,11 +1,11 @@
 """Weather station receiver: serial -> SQLite -> web dashboard.
 
-Runs on the Raspberry Pi with the Nucleo board plugged in over USB (the
-ST-LINK exposes the station's UART as /dev/ttyACM0):
+Runs on the Raspberry Pi with the station's Nucleo board plugged in over USB
+(the ST-LINK exposes the board's UART as /dev/ttyACM0):
 
-    python receiver.py --serial /dev/ttyACM0
+    python receiver.py --serial /dev/ttyACM0 --names "1=Indoor,2=Outdoor"
 
-Or with no hardware at all, using the built-in station simulator:
+Or with no hardware at all, using the built-in two-station simulator:
 
     python receiver.py --simulate --backfill-hours 24 --corrupt-rate 0.03
 
@@ -33,6 +33,7 @@ log = logging.getLogger("receiver")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STALE_AFTER_S = 10.0
 MAX_HISTORY_POINTS = 400
+COLUMNS = ("station", "ts", "seq", "temp", "hum", "press", "temp2", "status")
 
 
 # --------------------------------------------------------------------------- #
@@ -46,6 +47,7 @@ class Store:
             self._db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS readings (
+                    station INTEGER NOT NULL,
                     ts      REAL NOT NULL,
                     seq     INTEGER NOT NULL,
                     temp    REAL,
@@ -54,62 +56,64 @@ class Store:
                     temp2   REAL,
                     status  INTEGER NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS readings_ts ON readings(ts);
+                CREATE INDEX IF NOT EXISTS readings_station_ts ON readings(station, ts);
                 """
             )
 
+    @staticmethod
+    def _row(r: Reading) -> tuple:
+        return (r.station, r.received_at, r.seq, r.temperature_c, r.humidity_pct,
+                r.pressure_hpa, r.temperature2_c, r.status)
+
     def insert(self, r: Reading) -> None:
-        with self._lock:
-            self._db.execute(
-                "INSERT INTO readings VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (r.received_at, r.seq, r.temperature_c, r.humidity_pct,
-                 r.pressure_hpa, r.temperature2_c, r.status),
-            )
-            self._db.commit()
+        self.insert_many([r])
 
     def insert_many(self, readings: list[Reading]) -> None:
         with self._lock:
             self._db.executemany(
-                "INSERT INTO readings VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [(r.received_at, r.seq, r.temperature_c, r.humidity_pct,
-                  r.pressure_hpa, r.temperature2_c, r.status) for r in readings],
+                "INSERT INTO readings VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [self._row(r) for r in readings],
             )
             self._db.commit()
 
-    def latest(self) -> Optional[dict]:
+    def latest(self) -> list[dict]:
+        """Newest reading of every station that has ever reported."""
         with self._lock:
-            row = self._db.execute(
-                "SELECT ts, seq, temp, hum, press, temp2, status FROM readings "
-                "ORDER BY ts DESC LIMIT 1"
-            ).fetchone()
-        if row is None:
-            return None
-        keys = ("ts", "seq", "temp", "hum", "press", "temp2", "status")
-        return dict(zip(keys, row))
+            rows = self._db.execute(
+                f"""
+                SELECT {", ".join("r." + c for c in COLUMNS)} FROM readings r
+                JOIN (SELECT station, MAX(ts) AS ts FROM readings GROUP BY station) m
+                  ON r.station = m.station AND r.ts = m.ts
+                ORDER BY r.station
+                """
+            ).fetchall()
+        return [dict(zip(COLUMNS, row)) for row in rows]
 
-    def history(self, since: float, until: float) -> list[dict]:
-        """Averaged into at most MAX_HISTORY_POINTS buckets so the payload stays small."""
+    def history(self, since: float, until: float) -> dict[int, list[dict]]:
+        """Per-station series, averaged into at most MAX_HISTORY_POINTS buckets."""
         bucket = max((until - since) / MAX_HISTORY_POINTS, 1.0)
         with self._lock:
             rows = self._db.execute(
                 """
-                SELECT CAST(ts / :b AS INTEGER) * :b + :b / 2 AS t,
+                SELECT station, CAST(ts / :b AS INTEGER) * :b + :b / 2 AS t,
                        AVG(temp), AVG(hum), AVG(press), AVG(temp2)
                 FROM readings WHERE ts >= :since AND ts <= :until
-                GROUP BY CAST(ts / :b AS INTEGER) ORDER BY t
+                GROUP BY station, CAST(ts / :b AS INTEGER) ORDER BY station, t
                 """,
                 {"b": bucket, "since": since, "until": until},
             ).fetchall()
-        return [
-            {"ts": t, "temp": _r(a), "hum": _r(b), "press": _r(c), "temp2": _r(d)}
-            for t, a, b, c, d in rows
-        ]
+        out: dict[int, list[dict]] = {}
+        for station, t, a, b, c, d in rows:
+            out.setdefault(station, []).append(
+                {"ts": t, "temp": _r(a), "hum": _r(b), "press": _r(c), "temp2": _r(d)}
+            )
+        return out
 
-    def pressure_near(self, ts: float, window: float = 600.0) -> Optional[float]:
+    def pressure_near(self, station: int, ts: float, window: float = 600.0) -> Optional[float]:
         with self._lock:
             row = self._db.execute(
-                "SELECT AVG(press) FROM readings WHERE ts BETWEEN ? AND ?",
-                (ts - window / 2, ts + window / 2),
+                "SELECT AVG(press) FROM readings WHERE station = ? AND ts BETWEEN ? AND ?",
+                (station, ts - window / 2, ts + window / 2),
             ).fetchone()
         return row[0] if row else None
 
@@ -134,33 +138,44 @@ class LinkStats:
         self.frames_rejected = 0
         self.frames_dropped = 0
         self.station_restarts = 0
-        self.last_seq: Optional[int] = None
-        self._rejected_since_ok = 0  # rejected lines also leave a seq gap; don't count them twice
+        self.per_station: dict[int, dict] = {}
+        # A rejected line also leaves a seq gap at whichever station sent it.
+        # We can't tell which station that was, so the next gap anywhere absorbs
+        # it rather than being counted a second time as "dropped".
+        self._unattributed_rejects = 0
         self.started_at = time.time()
         self.recent_rejects: collections.deque = collections.deque(maxlen=12)
 
-    def accepted(self, seq: int) -> None:
+    def accepted(self, station: int, seq: int) -> None:
         with self._lock:
-            if self.last_seq is not None:
-                if seq <= self.last_seq:
+            st = self.per_station.setdefault(station, {"frames_ok": 0, "last_seq": None})
+            last = st["last_seq"]
+            if last is not None:
+                if seq <= last:
                     self.station_restarts += 1
-                    log.info("sequence went %d -> %d: station restarted", self.last_seq, seq)
+                    log.info("station %d: sequence went %d -> %d, station restarted", station, last, seq)
                 else:
-                    lost = seq - self.last_seq - 1 - self._rejected_since_ok
-                    if lost > 0:
-                        self.frames_dropped += lost
-                        log.warning("lost %d frame(s) before seq %d", lost, seq)
-            self.last_seq = seq
-            self._rejected_since_ok = 0
+                    gap = seq - last - 1
+                    absorbed = min(gap, self._unattributed_rejects)
+                    self._unattributed_rejects -= absorbed
+                    if gap - absorbed > 0:
+                        self.frames_dropped += gap - absorbed
+                        log.warning("station %d: lost %d frame(s) before seq %d", station, gap - absorbed, seq)
+            st["last_seq"] = seq
+            st["frames_ok"] += 1
             self.frames_ok += 1
 
     def rejected(self, line: str, reason: str) -> None:
         with self._lock:
             self.frames_rejected += 1
-            self._rejected_since_ok += 1
+            self._unattributed_rejects += 1
             self.recent_rejects.appendleft(
                 {"ts": time.time(), "line": line.rstrip("\r\n")[:80], "reason": reason}
             )
+
+    def station_frames(self, station: int) -> int:
+        with self._lock:
+            return self.per_station.get(station, {}).get("frames_ok", 0)
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -213,10 +228,11 @@ def ingest(lines: Iterator[tuple[float, str]], store: Store, stats: LinkStats,
             if line.strip():
                 log.info("station: %s", line.strip().lstrip("# "))
             continue
-        stats.accepted(reading.seq)
+        stats.accepted(reading.station, reading.seq)
         store.insert(reading)
         if reading.status:
-            log.warning("seq %d: sensor fault %s", reading.seq, ", ".join(reading.faulted_sensors))
+            log.warning("station %d seq %d: %s sensor fault", reading.station, reading.seq,
+                        ", ".join(reading.faults))
 
         if ts >= next_prune:
             removed = store.prune(ts - retention_days * 86400)
@@ -242,7 +258,7 @@ def backfill(store: Store, hours: float, period: float = 60.0) -> None:
 # --------------------------------------------------------------------------- #
 # Web API
 # --------------------------------------------------------------------------- #
-def create_app(store: Store, stats: LinkStats, source: str) -> Flask:
+def create_app(store: Store, stats: LinkStats, source: str, names: dict[int, str]) -> Flask:
     app = Flask(__name__, static_folder=None)
 
     @app.get("/")
@@ -252,36 +268,53 @@ def create_app(store: Store, stats: LinkStats, source: str) -> Flask:
     @app.get("/api/latest")
     def latest():
         now = time.time()
-        reading = store.latest()
-        trend = None
-        if reading and reading["press"] is not None:
-            past = store.pressure_near(reading["ts"] - 3 * 3600)
-            if past is not None:
-                trend = round(reading["press"] - past, 2)
-        return jsonify(
-            source=source,
-            now=now,
-            reading=reading,
-            stale=reading is None or now - reading["ts"] > STALE_AFTER_S,
-            pressure_trend_3h=trend,
-            link=stats.snapshot(),
-        )
+        stations = []
+        for reading in store.latest():
+            sid = reading.pop("station")
+            trend = None
+            if reading["press"] is not None:
+                past = store.pressure_near(sid, reading["ts"] - 3 * 3600)
+                if past is not None:
+                    trend = round(reading["press"] - past, 2)
+            stations.append({
+                "id": sid,
+                "name": names.get(sid, f"Station {sid}"),
+                "reading": reading,
+                "stale": now - reading["ts"] > STALE_AFTER_S,
+                "pressure_trend_3h": trend,
+                "frames_ok": stats.station_frames(sid),
+            })
+        return jsonify(source=source, now=now, stations=stations, link=stats.snapshot())
 
     @app.get("/api/history")
     def history():
         hours = min(max(request.args.get("hours", default=6.0, type=float), 0.05), 24 * 30)
         now = time.time()
-        return jsonify(hours=hours, points=store.history(now - hours * 3600, now))
+        series = store.history(now - hours * 3600, now)
+        return jsonify(hours=hours, stations={str(k): v for k, v in series.items()})
 
     return app
+
+
+def parse_names(text: str) -> dict[int, str]:
+    """'1=Indoor,2=Outdoor' -> {1: 'Indoor', 2: 'Outdoor'}"""
+    names = {}
+    for part in filter(None, (p.strip() for p in text.split(","))):
+        sid, sep, name = part.partition("=")
+        if not sep or not sid.strip().isdigit() or not name.strip():
+            raise argparse.ArgumentTypeError(f"bad station name {part!r}, expected ID=NAME")
+        names[int(sid)] = name.strip()
+    return names
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--serial", metavar="PORT", help="serial port, e.g. /dev/ttyACM0 or COM5")
-    src.add_argument("--simulate", action="store_true", help="use the built-in station simulator")
+    src.add_argument("--simulate", action="store_true", help="use the built-in two-station simulator")
     ap.add_argument("--baud", type=int, default=115200)
+    ap.add_argument("--names", type=parse_names, default=None, metavar="ID=NAME,...",
+                    help='station display names, e.g. "1=Indoor,2=Outdoor"')
     ap.add_argument("--db", default="weather.db", help="SQLite file (default: %(default)s)")
     ap.add_argument("--host", default="0.0.0.0", help="dashboard bind address (default: %(default)s)")
     ap.add_argument("--port", type=int, default=8080, help="dashboard port (default: %(default)s)")
@@ -299,20 +332,23 @@ def main() -> None:
     stats = LinkStats()
 
     if args.simulate:
-        if args.backfill_hours > 0 and store.latest() is None:
+        if args.backfill_hours > 0 and not store.latest():
             backfill(store, args.backfill_hours)
         lines = simulator.frames(corrupt_rate=args.corrupt_rate)
         source = "simulator"
+        names = dict(simulator.DEFAULT_NAMES)
     else:
         lines = serial_lines(args.serial, args.baud)
         source = args.serial
+        names = {}
+    names.update(args.names or {})
 
     threading.Thread(
         target=ingest, args=(lines, store, stats, args.retention_days), daemon=True, name="ingest"
     ).start()
 
     log.info("dashboard on http://%s:%d/", args.host, args.port)
-    create_app(store, stats, source).run(host=args.host, port=args.port, threaded=True)
+    create_app(store, stats, source, names).run(host=args.host, port=args.port, threaded=True)
 
 
 if __name__ == "__main__":
