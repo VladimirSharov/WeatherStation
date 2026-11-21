@@ -29,6 +29,7 @@ flowchart LR
 | [`receiver/`](receiver/) | Python service for the Pi: reads serial, rejects corrupt frames, stores per-station history in SQLite, serves the dashboard |
 | [`receiver/static/`](receiver/static/) | Single-file dashboard with no external dependencies, so it works on an offline Pi |
 | [`docs/hardware/`](docs/hardware/) | Wiring diagrams of the 2021 build |
+| [`legacy/2021-firmware/`](legacy/2021-firmware/) | The original 2021 master (LCD) and slave (sensor) firmware, kept for history |
 | [`legacy/2021-pi/`](legacy/2021-pi/) | The original 2021 Pi script and PHP page, kept for history |
 
 ### Station firmware
@@ -121,10 +122,8 @@ cd receiver && python -m unittest discover -s tests -v
 The project went through these stages in autumn 2021:
 
 1. **October: single-board prototype.** One NUCLEO-L152RE with the X-NUCLEO-IKS01A3 sensor shield, running uC/OS-III and printing temperature over UART. That firmware is what was in this repo, and it is the basis of today's [`station/`](station/).
-2. **November: three-board design.** The design grew to two sensor stations, each a Nucleo with its own temperature and humidity sensors on a breadboard. The meeting notes list a DS18B20 and a HIH-4000 to order. A central Nucleo drove a 16×2 character LCD with a contrast potentiometer. The first diagram linked a station to the central board through MAX485 RS-485 transceivers. Later revisions wire the boards directly.
-3. **December: Raspberry Pi.** The central board fed the Pi over USB. A Python 2 script saved readings to CSV and MySQL, and a PHP page showed the last ten as a table. Both are in [`legacy/2021-pi/`](legacy/2021-pi/).
-
-The firmware for the three-board build (station boards, central board and LCD driver) has not survived.
+2. **November: three-board design.** The design grew to two sensor stations, each a Nucleo reading an LM35 analog temperature sensor, plus a central "master" Nucleo driving a 16×2 character LCD. The stations sent their readings to the master over UART. The first diagram routed that link through MAX485 RS-485 transceivers; later revisions wire the boards directly. Snapshots of the master and slave firmware are in [`legacy/2021-firmware/`](legacy/2021-firmware/).
+3. **December: Raspberry Pi.** The master fed the Pi over USB. A Python 2 script saved readings to CSV and MySQL, and a PHP page showed the last ten as a table. Both are in [`legacy/2021-pi/`](legacy/2021-pi/). By then the stations also reported humidity; that last firmware version hasn't survived.
 
 | RS-485 link (first draft) | One station | Two stations | Final |
 |---|---|---|---|
@@ -140,6 +139,8 @@ The 2021 system was known for nonsense on the display and junk in the Pi's log. 
 2. **Sending the whole buffer.** `HAL_UART_Transmit(&huart2, MSG, sizeof(MSG), ...)` always sent all 20 bytes of the buffer, not the length of the string. Each line went out padded with NULs and leftovers from earlier messages.
 3. **A frozen HAL clock.** The vector table sends SysTick straight to the RTOS, so `HAL_IncTick()` never ran and `HAL_GetTick()` stayed at 0. `HAL_Delay()` could therefore never return, and HAL timeouts could never expire. The fix bases both on the 1 kHz OS tick. `HAL_Delay()` now yields to the scheduler instead of busy-waiting.
 4. **Re-initialisation while running.** The UART task re-ran `HAL_Init()`, `SystemClock_Config()` and `MX_USART2_UART_Init()` after the scheduler had started, reprogramming SysTick and the UART under the other tasks. Separately, `MX_I2C1_Init()` was given an uninitialised pointer.
+
+**In the master and slave firmware**, the slave sent bare 3-byte values (`"23\0"`) with no framing. The master waited for exactly 13 bytes, and with the same frozen HAL clock its 100 ms timeout never fired. Every read was a random slice of several readings, and the LCD showed whichever fragment came first. The master also forwarded its raw 13-byte buffer, NULs included, to the PC. [`legacy/2021-firmware/README.md`](legacy/2021-firmware/README.md) has the full breakdown.
 
 **In the Pi script**, values were read from fixed character positions (`data[4:6]`, `data[11:13]`, …), with nothing checking whether a line was intact. Any shifted or damaged line turned into junk values or a crash. [`legacy/2021-pi/README.md`](legacy/2021-pi/README.md) has the details.
 
